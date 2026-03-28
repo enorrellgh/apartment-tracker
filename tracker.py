@@ -1,22 +1,19 @@
 import os
 import json
-import re
+import time
 from datetime import datetime
 
-import requests
-from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ----------------------------
-# CONFIG
-# ----------------------------
-FLOORPLANS_URL = "https://www.101crossstreetapts.com/floorplans"
-SHEET_NAME = "Apartment Prices"
-
-# ----------------------------
-# GOOGLE SHEETS AUTH
+# LOAD GOOGLE CREDS
 # ----------------------------
 creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
 
@@ -25,78 +22,75 @@ with open("creds.json", "w") as f:
 
 scope = [
     "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive"
 ]
 
 creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open(SHEET_NAME).sheet1
+sheet = client.open("Apartment Prices").sheet1
 
 # ----------------------------
-# FETCH PAGE
+# SELENIUM SETUP
 # ----------------------------
-headers = {
-    "User-Agent": "Mozilla/5.0"
-}
+options = Options()
+options.add_argument("--headless=new")
+options.add_argument("--no-sandbox")
+options.add_argument("--disable-dev-shm-usage")
+options.add_argument("--window-size=1920,1080")
 
-resp = requests.get(FLOORPLANS_URL, headers=headers, timeout=30)
-resp.raise_for_status()
-
-html = resp.text
-soup = BeautifulSoup(html, "html.parser")
-text = soup.get_text("\n", strip=True)
+service = Service(ChromeDriverManager().install())
+driver = webdriver.Chrome(service=service, options=options)
 
 # ----------------------------
-# PARSE FLOOR PLAN BLOCKS
+# LOAD FLOORPLANS PAGE
 # ----------------------------
-# Pattern matches sections like:
-# A ... Studio ... 1 Bath ... 557-to 569 Sq. Ft. ... Starting at $1,670
-pattern = re.compile(
-    r"\b([A-R])\b\s+"
-    r"(Studio|1\s*Bed|2\s*Bed)\s+"
-    r"(\d\s*Bath)\s+"
-    r"([\d,\-\sto\.]+Sq\. Ft\.)\s+"
-    r"(Starting at \$[\d,]+|Call for details)",
-    re.IGNORECASE
-)
+driver.get("https://www.101crossstreetapts.com/floorplans")
 
-matches = pattern.findall(text)
+time.sleep(15)
 
-today = datetime.utcnow().strftime("%Y-%m-%d")
+# ----------------------------
+# SCRAPE FLOORPLAN DATA
+# ----------------------------
 rows = []
+today = datetime.utcnow().strftime("%Y-%m-%d")
 
-for plan, beds, baths, sqft, price in matches:
-    rows.append([
-        today,
-        plan.strip(),
-        beds.strip(),
-        baths.strip(),
-        sqft.strip(),
-        price.replace("Starting at $", "").replace("$", "").replace(",", "").strip()
-        if "Starting at $" in price else "CALL",
-    ])
+cards = driver.find_elements(By.CSS_SELECTOR, "[class*='floor']")
 
-# Remove duplicates while preserving order
-seen = set()
-deduped_rows = []
-for row in rows:
-    key = tuple(row)
-    if key not in seen:
-        seen.add(key)
-        deduped_rows.append(row)
+for card in cards:
+    try:
+        text = card.text.strip()
+
+        if "$" in text and ("Bed" in text or "Studio" in text):
+            lines = text.split("\n")
+
+            plan = None
+            price = None
+            beds = None
+
+            for line in lines:
+                if "$" in line:
+                    price = line.replace("Starting at $", "").replace("$", "").replace(",", "").strip()
+                elif "Bed" in line or "Studio" in line:
+                    beds = line
+                elif len(line) == 1:  # plan names like A, B, C
+                    plan = line
+
+            if plan and price:
+                rows.append([today, plan, beds, price])
+
+    except:
+        continue
+
+driver.quit()
 
 # ----------------------------
-# WRITE HEADER IF NEEDED
+# WRITE TO SHEETS
 # ----------------------------
-existing = sheet.get_all_values()
-if not existing:
-    sheet.append_row(["date", "floor_plan", "beds", "baths", "sqft", "price"])
+if rows:
+    if not sheet.get_all_values():
+        sheet.append_row(["date", "plan", "beds", "price"])
 
-# ----------------------------
-# APPEND NEW ROWS
-# ----------------------------
-if deduped_rows:
-    sheet.append_rows(deduped_rows, value_input_option="USER_ENTERED")
-    print(f"Uploaded {len(deduped_rows)} rows")
+    sheet.append_rows(rows)
+    print(f"Uploaded {len(rows)} rows")
 else:
-    print("No floor plan data found")
+    print("No data found")
