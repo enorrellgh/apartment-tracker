@@ -1,19 +1,18 @@
 import os
 import json
-import time
+import re
 from datetime import datetime
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-
+import requests
+from bs4 import BeautifulSoup
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+FLOORPLANS_URL = "https://www.101crossstreetapts.com/floorplans"
+SHEET_NAME = "Apartment Prices"
+
 # ----------------------------
-# LOAD GOOGLE CREDS
+# Google auth
 # ----------------------------
 creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
 
@@ -22,75 +21,84 @@ with open("creds.json", "w") as f:
 
 scope = [
     "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/drive",
 ]
 
 creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open("Apartment Prices").sheet1
+sheet = client.open(SHEET_NAME).sheet1
 
 # ----------------------------
-# SELENIUM SETUP
+# Fetch page
 # ----------------------------
-options = Options()
-options.add_argument("--headless=new")
-options.add_argument("--no-sandbox")
-options.add_argument("--disable-dev-shm-usage")
-options.add_argument("--window-size=1920,1080")
+headers = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=options)
+resp = requests.get(FLOORPLANS_URL, headers=headers, timeout=30)
+resp.raise_for_status()
+
+soup = BeautifulSoup(resp.text, "html.parser")
+text = soup.get_text("\n", strip=True)
 
 # ----------------------------
-# LOAD FLOORPLANS PAGE
+# Parse by plan sections
+# The page is structured like:
+# ## A
+# Studio
+# 1 Bath
+# 557-to 569 Sq. Ft.
+# Starting at $1,670
 # ----------------------------
-driver.get("https://www.101crossstreetapts.com/floorplans")
+pattern = re.compile(
+    r"##\s*([A-Z])\s+"
+    r"(Studio|1\s*Bed|2\s*Bed)\s+"
+    r"(\d\s*Bath)\s+"
+    r"([\d,\-\sto]+Sq\.\s*Ft\.)\s+"
+    r"(Starting at \$[\d,]+|Call for details)",
+    re.IGNORECASE
+)
 
-time.sleep(15)
+matches = pattern.findall(text)
 
-# ----------------------------
-# SCRAPE FLOORPLAN DATA
-# ----------------------------
-rows = []
 today = datetime.utcnow().strftime("%Y-%m-%d")
+rows = []
 
-cards = driver.find_elements(By.CSS_SELECTOR, "[class*='floor']")
+for plan, beds, baths, sqft, price_text in matches:
+    if "Starting at $" in price_text:
+        price = price_text.replace("Starting at $", "").replace(",", "").strip()
+    else:
+        price = "CALL"
 
-for card in cards:
-    try:
-        text = card.text.strip()
+    rows.append([today, plan.strip(), beds.strip(), baths.strip(), sqft.strip(), price])
 
-        if "$" in text and ("Bed" in text or "Studio" in text):
-            lines = text.split("\n")
+# Deduplicate
+seen = set()
+deduped = []
+for row in rows:
+    key = tuple(row)
+    if key not in seen:
+        seen.add(key)
+        deduped.append(row)
 
-            plan = None
-            price = None
-            beds = None
-
-            for line in lines:
-                if "$" in line:
-                    price = line.replace("Starting at $", "").replace("$", "").replace(",", "").strip()
-                elif "Bed" in line or "Studio" in line:
-                    beds = line
-                elif len(line) == 1:  # plan names like A, B, C
-                    plan = line
-
-            if plan and price:
-                rows.append([today, plan, beds, price])
-
-    except:
-        continue
-
-driver.quit()
+print(f"Found {len(deduped)} rows")
+for row in deduped[:5]:
+    print(row)
 
 # ----------------------------
-# WRITE TO SHEETS
+# Write to sheet
 # ----------------------------
-if rows:
-    if not sheet.get_all_values():
-        sheet.append_row(["date", "plan", "beds", "price"])
+existing = sheet.get_all_values()
+if not existing:
+    sheet.append_row(["date", "plan", "beds", "baths", "sqft", "price"])
 
-    sheet.append_rows(rows)
-    print(f"Uploaded {len(rows)} rows")
+if deduped:
+    sheet.append_rows(deduped, value_input_option="USER_ENTERED")
+    print(f"Uploaded {len(deduped)} rows")
 else:
     print("No data found")
