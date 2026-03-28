@@ -23,7 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 gspread oauth2client
+          pip install selenium gspread oauth2client webdriver-manager
 
       - name: Run script
         env:
