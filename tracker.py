@@ -35,17 +35,22 @@ sheet = client.open("Apartment Prices").sheet1
 # SELENIUM SETUP
 # ----------------------------
 options = Options()
-options.add_argument("--headless")
+options.add_argument("--headless=new")
 options.add_argument("--no-sandbox")
 options.add_argument("--disable-dev-shm-usage")
+options.add_argument("--window-size=1920,1080")
 
-driver = webdriver.Chrome(options=options)
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
+service = Service(ChromeDriverManager().install())
+driver = webdriver.Chrome(service=service, options=options)
 
 # ----------------------------
 # LOAD PAGE
 # ----------------------------
 driver.get("https://www.101crossstreetapts.com/site-map")
-time.sleep(10)
+time.sleep(15)
 
 # ----------------------------
 # SWITCH TO IFRAME
