@@ -2,23 +2,31 @@ name: Run Apartment Tracker
 
 on:
   schedule:
-    - cron: "0 13 * * *"  # 9 AM EST = 13 UTC
+    - cron: "0 13 * * *"  # 9 AM EST
   workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
 
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install Chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
 
       - name: Install dependencies
         run: |
-          pip install selenium pandas gspread oauth2client
+          pip install selenium pandas gspread oauth2client webdriver-manager
 
       - name: Run script
         env:
