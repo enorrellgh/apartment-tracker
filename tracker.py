@@ -1,18 +1,20 @@
 import os
 import json
+import time
 import re
 from datetime import datetime
 
-import requests
-from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-FLOORPLANS_URL = "https://www.101crossstreetapts.com/floorplans"
-SHEET_NAME = "Apartment Prices"
-
 # ----------------------------
-# Google auth
+# GOOGLE SHEETS SETUP
 # ----------------------------
 creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
 
@@ -21,50 +23,52 @@ with open("creds.json", "w") as f:
 
 scope = [
     "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive"
 ]
 
 creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open(SHEET_NAME).sheet1
+sheet = client.open("Apartment Prices").sheet1
 
 # ----------------------------
-# Fetch page
+# SELENIUM SETUP
 # ----------------------------
-headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+options = Options()
+options.add_argument("--headless=new")
+options.add_argument("--no-sandbox")
+options.add_argument("--disable-dev-shm-usage")
+options.add_argument("--window-size=1920,1080")
 
-resp = requests.get(FLOORPLANS_URL, headers=headers, timeout=30)
-resp.raise_for_status()
-
-soup = BeautifulSoup(resp.text, "html.parser")
-text = soup.get_text("\n", strip=True)
+service = Service(ChromeDriverManager().install())
+driver = webdriver.Chrome(service=service, options=options)
 
 # ----------------------------
-# Parse by plan sections
-# The page is structured like:
-# ## A
-# Studio
-# 1 Bath
-# 557-to 569 Sq. Ft.
-# Starting at $1,670
+# LOAD PAGE
+# ----------------------------
+driver.get("https://www.101crossstreetapts.com/floorplans")
+
+time.sleep(15)
+
+# ----------------------------
+# GET FULL PAGE TEXT
+# ----------------------------
+body_text = driver.find_element(By.TAG_NAME, "body").text
+
+driver.quit()
+
+# ----------------------------
+# PARSE TEXT (robust)
 # ----------------------------
 pattern = re.compile(
-    r"##\s*([A-Z])\s+"
+    r"\b([A-Z])\b\s+"
     r"(Studio|1\s*Bed|2\s*Bed)\s+"
     r"(\d\s*Bath)\s+"
-    r"([\d,\-\sto]+Sq\.\s*Ft\.)\s+"
+    r"([\d,\-\sto]+Sq\.?\s*Ft\.?)\s+"
     r"(Starting at \$[\d,]+|Call for details)",
     re.IGNORECASE
 )
 
-matches = pattern.findall(text)
+matches = pattern.findall(body_text)
 
 today = datetime.utcnow().strftime("%Y-%m-%d")
 rows = []
@@ -77,28 +81,24 @@ for plan, beds, baths, sqft, price_text in matches:
 
     rows.append([today, plan.strip(), beds.strip(), baths.strip(), sqft.strip(), price])
 
-# Deduplicate
+# Remove duplicates
+unique_rows = []
 seen = set()
-deduped = []
-for row in rows:
-    key = tuple(row)
-    if key not in seen:
-        seen.add(key)
-        deduped.append(row)
+for r in rows:
+    if tuple(r) not in seen:
+        seen.add(tuple(r))
+        unique_rows.append(r)
 
-print(f"Found {len(deduped)} rows")
-for row in deduped[:5]:
-    print(row)
+print(f"Found {len(unique_rows)} rows")
 
 # ----------------------------
-# Write to sheet
+# WRITE TO GOOGLE SHEETS
 # ----------------------------
-existing = sheet.get_all_values()
-if not existing:
+if not sheet.get_all_values():
     sheet.append_row(["date", "plan", "beds", "baths", "sqft", "price"])
 
-if deduped:
-    sheet.append_rows(deduped, value_input_option="USER_ENTERED")
-    print(f"Uploaded {len(deduped)} rows")
+if unique_rows:
+    sheet.append_rows(unique_rows)
+    print(f"Uploaded {len(unique_rows)} rows")
 else:
-    print("No data found")
+    print("⚠️ No data extracted")
