@@ -1,112 +1,102 @@
-import time
-import pandas as pd
-from datetime import datetime
-import json
 import os
+import json
+import re
+from datetime import datetime
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
+import requests
+from bs4 import BeautifulSoup
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ----------------------------
-# LOAD CREDS FROM ENV
+# CONFIG
+# ----------------------------
+FLOORPLANS_URL = "https://www.101crossstreetapts.com/floorplans"
+SHEET_NAME = "Apartment Prices"
+
+# ----------------------------
+# GOOGLE SHEETS AUTH
 # ----------------------------
 creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
 
 with open("creds.json", "w") as f:
     json.dump(creds_dict, f)
 
-# ----------------------------
-# GOOGLE SHEETS SETUP
-# ----------------------------
 scope = [
     "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/drive",
 ]
 
 creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open("Apartment Prices").sheet1
+sheet = client.open(SHEET_NAME).sheet1
 
 # ----------------------------
-# SELENIUM SETUP
+# FETCH PAGE
 # ----------------------------
-options = Options()
-options.add_argument("--headless=new")
-options.add_argument("--no-sandbox")
-options.add_argument("--disable-dev-shm-usage")
-options.add_argument("--window-size=1920,1080")
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+resp = requests.get(FLOORPLANS_URL, headers=headers, timeout=30)
+resp.raise_for_status()
 
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=options)
-
-# ----------------------------
-# LOAD PAGE
-# ----------------------------
-driver.get("https://www.101crossstreetapts.com/site-map")
-time.sleep(15)
+html = resp.text
+soup = BeautifulSoup(html, "html.parser")
+text = soup.get_text("\n", strip=True)
 
 # ----------------------------
-# SWITCH TO IFRAME
+# PARSE FLOOR PLAN BLOCKS
 # ----------------------------
-iframes = driver.find_elements(By.TAG_NAME, "iframe")
+# Pattern matches sections like:
+# A ... Studio ... 1 Bath ... 557-to 569 Sq. Ft. ... Starting at $1,670
+pattern = re.compile(
+    r"\b([A-R])\b\s+"
+    r"(Studio|1\s*Bed|2\s*Bed)\s+"
+    r"(\d\s*Bath)\s+"
+    r"([\d,\-\sto\.]+Sq\. Ft\.)\s+"
+    r"(Starting at \$[\d,]+|Call for details)",
+    re.IGNORECASE
+)
 
-for iframe in iframes:
-    src = iframe.get_attribute("src")
-    if "sightmap" in (src or ""):
-        driver.switch_to.frame(iframe)
-        break
+matches = pattern.findall(text)
 
-time.sleep(6)
-
-# ----------------------------
-# SCRAPE DATA
-# ----------------------------
+today = datetime.utcnow().strftime("%Y-%m-%d")
 rows = []
-today = datetime.today().strftime("%Y-%m-%d")
 
-units = driver.find_elements(By.CSS_SELECTOR, "[class*='unit']")
+for plan, beds, baths, sqft, price in matches:
+    rows.append([
+        today,
+        plan.strip(),
+        beds.strip(),
+        baths.strip(),
+        sqft.strip(),
+        price.replace("Starting at $", "").replace("$", "").replace(",", "").strip()
+        if "Starting at $" in price else "CALL",
+    ])
 
-for u in units:
-    try:
-        text = u.text.strip()
-
-        if "$" in text:
-            lines = text.split("\n")
-
-            unit = None
-            price = None
-
-            for line in lines:
-                if "$" in line:
-                    price = line.replace("$", "").replace(",", "")
-                elif any(char.isdigit() for char in line):
-                    unit = line
-
-            if unit and price:
-                rows.append([today, unit, price])
-
-    except:
-        continue
-
-driver.quit()
+# Remove duplicates while preserving order
+seen = set()
+deduped_rows = []
+for row in rows:
+    key = tuple(row)
+    if key not in seen:
+        seen.add(key)
+        deduped_rows.append(row)
 
 # ----------------------------
-# PUSH TO SHEETS
+# WRITE HEADER IF NEEDED
 # ----------------------------
-if rows:
-    if not sheet.get_all_values():
-        sheet.append_row(["date", "unit", "price"])
+existing = sheet.get_all_values()
+if not existing:
+    sheet.append_row(["date", "floor_plan", "beds", "baths", "sqft", "price"])
 
-    for row in rows:
-        sheet.append_row(row)
-
-    print(f"Uploaded {len(rows)} rows")
+# ----------------------------
+# APPEND NEW ROWS
+# ----------------------------
+if deduped_rows:
+    sheet.append_rows(deduped_rows, value_input_option="USER_ENTERED")
+    print(f"Uploaded {len(deduped_rows)} rows")
 else:
-    print("No data found")
+    print("No floor plan data found")
